@@ -40,27 +40,6 @@ function Optim.weight_bias_parameters(module)
     return {weight_params, bias_params}
 end
 
-function Optim.get_module_key(module)
-
-    --return module
-    return module.sharedWith or module
-
-
-    -- Basically, the goal is to understand whether
-    -- or not this module shares parameters with another
-    -- module. Simplest way to do this is to use the storage
-    -- for the weights if the weights exist
-    --if not module.weight then
-    --    print('No weights')
-    --    print(module)
-    --    return module
-    --end
-
-    --print('Weights')
-    --return module.weight:storage()
-
-end
-
 -- The regular `optim` package relies on `getParameters`, which is a
 -- beastly abomination before all. This `optim` package uses separate
 -- optim state for each submodule of a `nn.Module`.
@@ -82,9 +61,6 @@ end
 
 function Optim:addModel(model)
 
-    print('Adding model to optimizer')
-    print(model)
-
     local optState = self.originalOptState
     
     -- Each module has some set of parameters and grad parameters. Since
@@ -94,26 +70,21 @@ function Optim:addModel(model)
     model:for_each(
         function(module)
 
-            local mod_key = self.get_module_key(module)
-
-            if self.modulesToOptState[mod_key] then
-                print('Detected shared module')
-                print(module)
-            else
-                self.modulesToOptState[mod_key] = { }
+            if not self.modulesToOptState[module] then
+                self.modulesToOptState[module] = { }
                 local params = self.weight_bias_parameters(module)
                 -- expects either an empty table or 2 element table, one for weights
                 -- and one for biases
                 assert(pl.tablex.size(params) == 0 or pl.tablex.size(params) == 2)
                 for i, _ in ipairs(params) do
-                    self.modulesToOptState[mod_key][i] = deepcopy(optState)
+                    self.modulesToOptState[module][i] = deepcopy(optState)
                     if params[i] and params[i].is_bias then
                         -- never regularize biases
-                        self.modulesToOptState[mod_key][i].weightDecay = 0.0
+                        self.modulesToOptState[module][i].weightDecay = 0.0
                     end
                 end
                 assert(module)
-                assert(self.modulesToOptState[mod_key])
+                assert(self.modulesToOptState[module])
             end
         end
     )
@@ -174,20 +145,43 @@ local function on_device_for_module(mod, f)
     return f()
 end
 
+local function default_evaluate(model, inputs, targets, criterion)
+
+    model:zeroGradParameters()
+
+    local output = model:forward(inputs)
+
+    local err = criterion:forward(output, targets)
+
+    local df_do = criterion:backward(output, targets)
+
+    model:backward(inputs, df_do)
+
+    return err, output
+
+end
+
 function Optim:optimize(model, optimMethod, inputs, targets, criterion)
+
+    return self:optimize_manual(model,
+                                default_evaluate,
+                                optimMethod,
+                                inputs,
+                                targets,
+                                criterion)
+
+end
+
+function Optim:optimize_manual(model, evalMethod, optimMethod, inputs, targets, criterion)
+    assert(model)
+    assert(evalMethod)
     assert(optimMethod)
     assert(inputs)
     assert(targets)
     assert(criterion)
     assert(self.modulesToOptState)
 
-    model:zeroGradParameters()
-    local output = model:forward(inputs)
-
-    local err = criterion:forward(output, targets)
-
-    local df_do = criterion:backward(output, targets)
-    model:backward(inputs, df_do)
+    local err, output = evalMethod(model, inputs, targets, criterion)
 
     -- We'll set these in the loop that iterates over each module. Get them
     -- out here to be captured.
@@ -199,9 +193,7 @@ function Optim:optimize(model, optimMethod, inputs, targets, criterion)
 
     model:for_each(
         function(curMod)
-            local mod_key = self.get_module_key(curMod)
-
-            assert(self.modulesToOptState[mod_key],
+            assert(self.modulesToOptState[curMod],
                    'The specified model hasn\'t been added to the optimizer!')
 
             local curModParams = self.weight_bias_parameters(curMod)
