@@ -40,47 +40,84 @@ function Optim.weight_bias_parameters(module)
     return {weight_params, bias_params}
 end
 
+function Optim.get_module_key(module)
+
+    --return module
+    return module.sharedWith or module
+
+
+    -- Basically, the goal is to understand whether
+    -- or not this module shares parameters with another
+    -- module. Simplest way to do this is to use the storage
+    -- for the weights if the weights exist
+    --if not module.weight then
+    --    print('No weights')
+    --    print(module)
+    --    return module
+    --end
+
+    --print('Weights')
+    --return module.weight:storage()
+
+end
+
 -- The regular `optim` package relies on `getParameters`, which is a
 -- beastly abomination before all. This `optim` package uses separate
 -- optim state for each submodule of a `nn.Module`.
-function Optim:__init(model, optState, checkpoint_data)
-    assert(model)
-    assert(checkpoint_data or optState)
-    assert(not (checkpoint_data and optState))
-
-    self.model = model
+function Optim:__init(optState)
+    
     self.modulesToOptState = {}
     -- Keep this around so we update it in setParameters
     self.originalOptState = optState
 
+    --if not checkpoint_data then
+    --else
+    --    local state = checkpoint_data.optim_state
+    --    local modules = {}
+    --    self.model:for_each(function(m) table.insert(modules, m) end)
+    --    assert(pl.tablex.compare_no_order(modules, pl.tablex.keys(state)))
+    --    self.modulesToOptState = state
+    --end
+end
+
+function Optim:addModel(model)
+
+    print('Adding model to optimizer')
+    print(model)
+
+    local optState = self.originalOptState
+    
     -- Each module has some set of parameters and grad parameters. Since
     -- they may be allocated discontinuously, we need separate optState for
     -- each parameter tensor. self.modulesToOptState maps each module to
     -- a lua table of optState clones.
-    if not checkpoint_data then
-        self.model:for_each(function(module)
-            self.modulesToOptState[module] = { }
-            local params = self.weight_bias_parameters(module)
-            -- expects either an empty table or 2 element table, one for weights
-            -- and one for biases
-            assert(pl.tablex.size(params) == 0 or pl.tablex.size(params) == 2)
-            for i, _ in ipairs(params) do
-                self.modulesToOptState[module][i] = deepcopy(optState)
-                if params[i] and params[i].is_bias then
-                    -- never regularize biases
-                    self.modulesToOptState[module][i].weightDecay = 0.0
+    model:for_each(
+        function(module)
+
+            local mod_key = self.get_module_key(module)
+
+            if self.modulesToOptState[mod_key] then
+                print('Detected shared module')
+                print(module)
+            else
+                self.modulesToOptState[mod_key] = { }
+                local params = self.weight_bias_parameters(module)
+                -- expects either an empty table or 2 element table, one for weights
+                -- and one for biases
+                assert(pl.tablex.size(params) == 0 or pl.tablex.size(params) == 2)
+                for i, _ in ipairs(params) do
+                    self.modulesToOptState[mod_key][i] = deepcopy(optState)
+                    if params[i] and params[i].is_bias then
+                        -- never regularize biases
+                        self.modulesToOptState[mod_key][i].weightDecay = 0.0
+                    end
                 end
+                assert(module)
+                assert(self.modulesToOptState[mod_key])
             end
-            assert(module)
-            assert(self.modulesToOptState[module])
-        end)
-    else
-        local state = checkpoint_data.optim_state
-        local modules = {}
-        self.model:for_each(function(m) table.insert(modules, m) end)
-        assert(pl.tablex.compare_no_order(modules, pl.tablex.keys(state)))
-        self.modulesToOptState = state
-    end
+        end
+    )
+
 end
 
 function Optim:save()
@@ -103,11 +140,15 @@ local function _type_all(obj, t)
 end
 
 function Optim:type(t)
-    self.model:for_each(function(module)
-        local state= self.modulesToOptState[module]
-        assert(state)
-        _type_all(state, t)
-    end)
+    for k,v in pairs(self.modulesToOptState) do
+        _type_all(v, t)
+    end
+    
+    --self.model:for_each(function(module)
+    --    local state= self.modulesToOptState[module]
+    --    assert(state)
+    --    _type_all(state, t)
+    --end)
 end
 
 local function get_device_for_module(mod)
@@ -133,20 +174,20 @@ local function on_device_for_module(mod, f)
     return f()
 end
 
-function Optim:optimize(optimMethod, inputs, targets, criterion)
+function Optim:optimize(model, optimMethod, inputs, targets, criterion)
     assert(optimMethod)
     assert(inputs)
     assert(targets)
     assert(criterion)
     assert(self.modulesToOptState)
 
-    self.model:zeroGradParameters()
-    local output = self.model:forward(inputs)
+    model:zeroGradParameters()
+    local output = model:forward(inputs)
 
     local err = criterion:forward(output, targets)
 
     local df_do = criterion:backward(output, targets)
-    self.model:backward(inputs, df_do)
+    model:backward(inputs, df_do)
 
     -- We'll set these in the loop that iterates over each module. Get them
     -- out here to be captured.
@@ -156,9 +197,15 @@ function Optim:optimize(optimMethod, inputs, targets, criterion)
         return err, curGrad
     end
 
-    for curMod, opt in pairs(self.modulesToOptState) do
-        on_device_for_module(curMod, function()
+    model:for_each(
+        function(curMod)
+            local mod_key = self.get_module_key(curMod)
+
+            assert(self.modulesToOptState[mod_key],
+                   'The specified model hasn\'t been added to the optimizer!')
+
             local curModParams = self.weight_bias_parameters(curMod)
+
             -- expects either an empty table or 2 element table, one for weights
             -- and one for biases
             assert(pl.tablex.size(curModParams) == 0 or
@@ -173,8 +220,9 @@ function Optim:optimize(optimMethod, inputs, targets, criterion)
                     end
                 end
             end
-        end)
-    end
+
+        end
+    )
 
     return err, output
 end
