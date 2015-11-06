@@ -43,11 +43,21 @@ end
 -- The regular `optim` package relies on `getParameters`, which is a
 -- beastly abomination before all. This `optim` package uses separate
 -- optim state for each submodule of a `nn.Module`.
-function Optim:__init(optState)
+function Optim:__init(model, optState)
     
+    -- Preserve backward compatibility
+    if model and not optState then
+        optState = model
+        model = nil
+    end
+
     self.modulesToOptState = {}
     -- Keep this around so we update it in setParameters
     self.originalOptState = optState
+
+    if model then
+        self:addModel(model)
+    end
 
     --if not checkpoint_data then
     --else
@@ -69,8 +79,9 @@ function Optim:addModel(model)
     -- a lua table of optState clones.
     model:for_each(
         function(module)
-
+            
             if not self.modulesToOptState[module] then
+                print('Adding Optim State for new module')
                 self.modulesToOptState[module] = { }
                 local params = self.weight_bias_parameters(module)
                 -- expects either an empty table or 2 element table, one for weights
@@ -85,7 +96,10 @@ function Optim:addModel(model)
                 end
                 assert(module)
                 assert(self.modulesToOptState[module])
+            else
+                print('Found existing optim state for module. Skipping')
             end
+        
         end
     )
 
@@ -114,12 +128,6 @@ function Optim:type(t)
     for k,v in pairs(self.modulesToOptState) do
         _type_all(v, t)
     end
-    
-    --self.model:for_each(function(module)
-    --    local state= self.modulesToOptState[module]
-    --    assert(state)
-    --    _type_all(state, t)
-    --end)
 end
 
 local function get_device_for_module(mod)
@@ -193,10 +201,13 @@ function Optim:optimize_manual(model, evalMethod, optimMethod, inputs, targets, 
 
     model:for_each(
         function(curMod)
-            assert(self.modulesToOptState[curMod],
+            local opt = self.modulesToOptState[curMod]
+            
+            assert(opt,
                    'The specified model hasn\'t been added to the optimizer!')
 
             local curModParams = self.weight_bias_parameters(curMod)
+            
 
             -- expects either an empty table or 2 element table, one for weights
             -- and one for biases
