@@ -81,7 +81,6 @@ function Optim:addModel(model)
         function(module)
             
             if not self.modulesToOptState[module] then
-                print('Adding Optim State for new module')
                 self.modulesToOptState[module] = { }
                 local params = self.weight_bias_parameters(module)
                 -- expects either an empty table or 2 element table, one for weights
@@ -96,8 +95,6 @@ function Optim:addModel(model)
                 end
                 assert(module)
                 assert(self.modulesToOptState[module])
-            else
-                print('Found existing optim state for module. Skipping')
             end
         
         end
